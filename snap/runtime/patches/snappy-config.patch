@@ -1,0 +1,97 @@
+diff --git a/cli/config.go b/cli/config.go
+index fabb8a7..13f5f0e 100644
+--- a/cli/config.go
++++ b/cli/config.go
+@@ -9,6 +9,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"io/ioutil"
++	"os"
+ 	goruntime "runtime"
+ 	"strings"
+ 
+@@ -56,6 +57,8 @@ const (
+ 	maxPCIBridges uint32 = 5
+ )
+ 
++var snap = ""
++
+ type tomlConfig struct {
+ 	Hypervisor map[string]hypervisor
+ 	Proxy      map[string]proxy
+@@ -123,7 +126,7 @@ func (h hypervisor) kernel() (string, error) {
+ 		p = defaultKernelPath
+ 	}
+ 
+-	return resolvePath(p)
++	return resolvePath(snap + p)
+ }
+ 
+ func (h hypervisor) initrd() (string, error) {
+@@ -133,7 +136,7 @@ func (h hypervisor) initrd() (string, error) {
+ 		return "", nil
+ 	}
+ 
+-	return resolvePath(p)
++	return resolvePath(snap + p)
+ }
+ 
+ func (h hypervisor) image() (string, error) {
+@@ -143,7 +146,7 @@ func (h hypervisor) image() (string, error) {
+ 		return "", nil
+ 	}
+ 
+-	return resolvePath(p)
++	return resolvePath(snap + p)
+ }
+ 
+ func (h hypervisor) firmware() (string, error) {
+@@ -267,7 +270,7 @@ func (p proxy) path() string {
+ 		return defaultProxyPath
+ 	}
+ 
+-	return p.Path
++	return snap + p.Path
+ }
+ 
+ func (p proxy) debug() bool {
+@@ -281,7 +284,7 @@ func (s shim) path() (string, error) {
+ 		p = defaultShimPath
+ 	}
+ 
+-	return resolvePath(p)
++	return resolvePath(snap + p)
+ }
+ 
+ func (s shim) debug() bool {
+@@ -539,7 +542,17 @@ func getDefaultConfigFilePaths() []string {
+ 		defaultSysConfRuntimeConfiguration,
+ 
+ 		// normally below "/usr/share"
+-		defaultRuntimeConfiguration,
++		os.Getenv("SNAP") + defaultRuntimeConfiguration,
++	}
++}
++
++func getDefaultSnapConfigFilePaths() map[string]string {
++	return map[string]string{
++		// normally below "/etc"
++		defaultSysConfRuntimeConfiguration: "",
++
++		// normally below "/usr/share"
++		os.Getenv("SNAP") + defaultRuntimeConfiguration: os.Getenv("SNAP"),
+ 	}
+ }
+ 
+@@ -549,9 +562,10 @@ func getDefaultConfigFilePaths() []string {
+ func getDefaultConfigFile() (string, error) {
+ 	var errs []string
+ 
+-	for _, file := range getDefaultConfigFilePaths() {
++	for file, snapPath := range getDefaultSnapConfigFilePaths() {
+ 		resolved, err := resolvePath(file)
+ 		if err == nil {
++			snap = snapPath
+ 			return resolved, nil
+ 		}
+ 		s := fmt.Sprintf("config file %q unresolvable: %v", file, err)

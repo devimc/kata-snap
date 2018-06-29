@@ -1,0 +1,207 @@
+name: kata-containers
+version: 1.0.0
+summary: Build lightweight VMs that seamlessly plug into the containers ecosystem
+description: |
+  Kata Containers is an open source project and community working to build a
+  standard implementation of lightweight Virtual Machines (VMs) that feel and
+  perform like containers, but provide the workload isolation and security
+  advantages of VMs
+grade: stable
+confinement: classic
+
+parts:
+  go:
+    source-tag: go1.10.3
+  runtime:
+    source: http://github.com/kata-containers/runtime
+    source-type: git
+    source-tag: ${SNAPCRAFT_PROJECT_VERSION}
+    after: [go, runtime-dump]
+    plugin: go
+    go-importpath: github.com/kata-containers/runtime
+    build-attributes: [no-patchelf]
+    override-build: |
+      export GOPATH=$(realpath ../go)
+      cd ${GOPATH}/src/github.com/kata-containers/runtime
+      for patch in ${SNAPCRAFT_STAGE}/runtime/patches/*.patch; do
+        echo "Applying $(basename "$patch") ..."
+        patch \
+          --batch \
+          --forward \
+          --strip 1 \
+          --input "$patch"
+        echo
+      done
+      make \
+        QEMUPATH=/usr/bin/qemu-system-x86_64
+      make install \
+        SCRIPTS_DIR=${SNAPCRAFT_PART_INSTALL}/usr/bin \
+        DESTTARGET=${SNAPCRAFT_PART_INSTALL}/usr/bin/kata-runtime \
+        DESTCONFIG=${SNAPCRAFT_PART_INSTALL}/usr/share/defaults/kata-containers/configuration.toml \
+        QEMUPATH=/usr/bin/qemu-system-x86_64
+      sed -i -e '/^image =/d' ${SNAPCRAFT_PART_INSTALL}/usr/share/defaults/kata-containers/configuration.toml
+    prime:
+      - usr/bin/*
+      - usr/share/*
+
+  runtime-dump:
+    source: snap/runtime
+    plugin: dump
+    organize:
+      '*' : runtime/
+    prime:
+      - -*
+
+  proxy:
+    source: http://github.com/kata-containers/proxy
+    source-type: git
+    source-tag: ${SNAPCRAFT_PROJECT_VERSION}
+    after: [go]
+    plugin: go
+    go-importpath: github.com/kata-containers/proxy
+    build-attributes: [no-patchelf]
+    override-build: |
+      export GOPATH=$(realpath ../go)
+      cd ${GOPATH}/src/github.com/kata-containers/proxy
+      make
+      make install LIBEXECDIR=${SNAPCRAFT_PART_INSTALL}/usr/libexec
+    prime:
+      - usr/libexec/*
+
+  shim:
+    source: http://github.com/kata-containers/shim
+    source-type: git
+    source-tag: ${SNAPCRAFT_PROJECT_VERSION}
+    after: [go]
+    plugin: go
+    go-importpath: github.com/kata-containers/shim
+    build-attributes: [no-patchelf]
+    build-packages:
+      - libelf-dev
+    override-build: |
+      export GOPATH=$(realpath ../go)
+      cd ${GOPATH}/src/github.com/kata-containers/shim
+      make
+      make install LIBEXECDIR=${SNAPCRAFT_PART_INSTALL}/usr/libexec
+    prime:
+      - usr/libexec/*
+
+  image:
+    source: http://github.com/kata-containers/osbuilder
+    source-type: git
+    after: [go]
+    plugin: make
+    build-packages:
+      - docker.io
+    override-build: |
+      echo "Setting proxy $http_proxy"
+      systemctl set-environment http_proxy=$http_proxy; true
+      systemctl set-environment https_proxy=$https_proxy; true
+
+      echo "Starting docker"
+      systemctl start docker; true
+
+      export GOPATH=$(realpath ../go)
+      mkdir -p $GOPATH
+
+      sed -i 's|^GO_VERSION=.*|GO_VERSION='$(go version | cut -d' ' -f3 | tr -d go)'|g' rootfs-builder/versions.txt
+
+      sudo -E PATH=$PATH make DISTRO=alpine USE_DOCKER=true AGENT_VERSION=${SNAPCRAFT_PROJECT_VERSION} AGENT_INIT=yes rootfs
+      sudo -E PATH=$PATH make DISTRO=alpine AGENT_INIT=yes initrd-only
+
+      kata_image_dir=${SNAPCRAFT_PART_INSTALL}/usr/share/kata-containers
+      mkdir -p ${kata_image_dir}
+      cp kata-containers-initrd.img ${kata_image_dir}
+    prime:
+      - usr/share/kata-containers/*
+
+  ksm-throttler:
+    source: http://github.com/kata-containers/ksm-throttler
+    source-type: git
+    source-tag: ${SNAPCRAFT_PROJECT_VERSION}
+    after: [go]
+    plugin: go
+    go-importpath: github.com/kata-containers/ksm-throttler
+    build-attributes: [no-patchelf]
+    override-build: |
+      export GOPATH=$(realpath ../go)
+      cd ${GOPATH}/src/github.com/kata-containers/ksm-throttler
+      make TARGET=kata-ksm-throttler
+      make install \
+        DESTDIR=${SNAPCRAFT_PART_INSTALL} \
+        TARGET=kata-ksm-throttler
+    prime:
+      - usr/libexec/kata-ksm-throttler/*
+      - lib/systemd/system/*
+
+  kernel:
+    source: https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.14.51.tar.xz
+    source-type: tar
+    after: [kernel-dump]
+    plugin: kernel
+    override-build: |
+      case "$(arch)" in
+        "x86_64")
+          config=x86_64_kata_kvm_4.14.x
+        ;;
+
+        "ppc64le")
+          config=ppc64le_kata_kvm_4.14.x
+        ;;
+
+        "aarch64")
+          config=arm64_kata_kvm_4.14.x
+        ;;
+
+        *)
+          echo "ERROR: Unsupported architecture $(arch)"
+          exit 1
+        ;;
+      esac
+
+      make mrproper
+
+      # Apply patches
+      for patch in ${SNAPCRAFT_STAGE}/kernel/patches/*.patch; do
+        echo "Applying $(basename "$patch") ..."
+        patch \
+          --batch \
+          --forward \
+          --strip 1 \
+          --input "$patch"
+        echo
+      done
+
+      # Copy config file
+      cp ${SNAPCRAFT_STAGE}/kernel/configs/${config} .config
+      make -s oldconfig EXTRAVERSION=".container" > /dev/null
+      make -j $(nproc) EXTRAVERSION=".container"
+
+      kernel_version=$(make kernelversion)
+      kernel_suffix=${kernel_version}.container
+      kata_kernel_dir=${SNAPCRAFT_PART_INSTALL}/usr/share/kata-containers
+      mkdir -p ${kata_kernel_dir}
+
+      # Install bz kernel
+      make install INSTALL_PATH=${kata_kernel_dir} EXTRAVERSION=".container" || true
+      vmlinuz_name=vmlinuz-${kernel_suffix}
+      ln -sf ${vmlinuz_name} ${kata_kernel_dir}/vmlinuz.container
+
+      # Install raw kernel
+      vmlinux_name=vmlinux-${kernel_suffix}
+      cp vmlinux ${kata_kernel_dir}/${vmlinux_name}
+      ln -sf ${vmlinux_name} ${kata_kernel_dir}/vmlinux.container
+    prime:
+      - usr/share/kata-containers/*
+
+  kernel-dump:
+    source: snap/kernel
+    plugin: dump
+    organize:
+      '*' : kernel/
+    prime:
+      - -*
+
+apps:
+  runtime:
+    command: usr/bin/kata-runtime
